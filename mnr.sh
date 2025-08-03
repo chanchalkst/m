@@ -48,7 +48,7 @@ if ! type curl >/dev/null; then
 fi
 
 CPU_THREADS=$(nproc)
-EXP_MONERO_HASHRATE=$(( CPU_THREADS * 700 / 1000))
+EXP_MONERO_HASHRATE=$(( CPU_THREADS * 900 / 1000))
 if [ -z "$EXP_MONERO_HASHRATE" ]; then
   echo "ERROR: Can't compute projected Monero CN hashrate"
   exit 1
