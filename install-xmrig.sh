@@ -27,6 +27,13 @@ sudo cmake ..
 sudo make -j$(nproc)
 
 # 5. Create XMRig config with fixed wallet and user-defined worker name
+# Set your fixed wallet address here (without worker name)
+WALLET="YOUR_FIXED_MONERO_WALLET_ADDRESS"
+
+# Worker name to append after a dot
+WORKER_NAME="worker01"
+
+# Create config with wallet.worker format
 sudo tee /opt/xmrig/config.json > /dev/null <<EOF
 {
   "autosave": true,
@@ -40,13 +47,13 @@ sudo tee /opt/xmrig/config.json > /dev/null <<EOF
   "log-file": null,
   "api": {
     "id": null,
-    "worker-id": "$WORKER_NAME"
+    "worker-id": ""
   },
   "pools": [
     {
-      "url": "pool.supportxmr.com:443",
-      "user": "42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE",
-      "pass": "$WORKER_NAME",
+      "url": "pool.supportxmr.com:3333",
+      "user": "${WALLET}.${WORKER_NAME}",
+      "pass": "",
       "keepalive": true,
       "tls": true
     }
