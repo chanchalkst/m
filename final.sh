@@ -1,20 +1,20 @@
 #!/bin/bash
 
 # ===== CONFIGURATION =====
-WALLET="YOUR_XMR_WALLET_ADDRESS"
+WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 SERVER_IP=$(curl -s ifconfig.me || hostname -I | awk '{print $1}')
 
 # GitHub Naming Server
-GITHUB_REPO="yourusername/worker-names"  # Public repo with counter.txt
-GITHUB_TOKEN="github_pat_..."            # Token with repo access
+GITHUB_REPO="chanchalkst/worker-names"  # Public repo with counter.txt
+GITHUB_TOKEN="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"            # Token with repo access
 NAMING_FILE="counter.txt"                # Stores current counter
 
 # Telegram Bots
-INSTALL_BOT_TOKEN="123456:ABC-DEF1234"
-HEALTH_BOT_TOKEN="123456:GHI-JKL5678"
-EARNINGS_BOT_TOKEN="123456:MNO-PQR9012"
-CRASH_BOT_TOKEN="123456:STU-VWX3456"
-CHAT_ID="123456789"
+INSTALL_BOT_TOKEN="8264582378:AAEkx2WgWWOKykgFETsPje2QxuHpBAnUR-4"
+HEALTH_BOT_TOKEN="7733572867:AAF3hwSUSmisYaPTztRUQ8fgfO6hQT57lAw"
+EARNINGS_BOT_TOKEN="8217562760:AAGnonmR9Roa6lRmMoVUAVh7n9GpUGq-ynQ"
+CRASH_BOT_TOKEN="8229778599:AAGeBM3r7TZ77FqDqwS3s-Zfh6cYKFmpTwA"
+CHAT_ID="5304966667"
 
 LOG_FILE="/var/log/xmrig_monitor.log"
 LOW_HASHRATE_THRESHOLD=1.0  # kH/s
