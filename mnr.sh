@@ -1,145 +1,200 @@
 #!/bin/bash
 
-VERSION=1.5
+VERSION=2.11
 
-echo "SupportXMR mining setup script v$VERSION."
+echo "MoneroOcean mining setup script v$VERSION."
+echo "(please report issues to support@moneroocean.stream email with full output of this script with extra \"-x\" \"bash\" option)"
 echo
 
 if [ "$(id -u)" == "0" ]; then
   echo "WARNING: Generally it is not advised to run this script under root"
 fi
 
-# Args:
-# $1 = wallet[.worker]
-WALLET_INPUT=$1
+# command line arguments
+WALLET=$1
+EMAIL=$2 # optional
 
-if [ -z "$WALLET_INPUT" ]; then
-  echo "Usage:"
-  echo "  ./setup_supportxmr_miner.sh <wallet[.worker]>"
-  echo "Example:"
-  echo "  ./setup_supportxmr_miner.sh 48...Wallet.Worker1"
+if [ -z "$WALLET" ]; then
+  echo "Script usage:"
+  echo "> setup_moneroocean_miner.sh <wallet.worker> [<your email address>]"
+  echo "ERROR: Please specify your wallet address with worker (like wallet.worker)"
   exit 1
 fi
 
-# Extract wallet and optional worker
-WALLET=$(echo "$WALLET_INPUT" | cut -d"." -f1)
-WORKER=$(echo "$WALLET_INPUT" | cut -s -d"." -f2)
+# extract wallet base (before the first dot)
+WALLET_BASE=$(echo "$WALLET" | cut -f1 -d'.')
 
-if [ ${#WALLET} != 106 ] && [ ${#WALLET} != 95 ]; then
-  echo "ERROR: Wallet length should be 106 or 95 characters."
+# check wallet length: 106 or 95 chars
+if [ ${#WALLET_BASE} != 106 ] && [ ${#WALLET_BASE} != 95 ]; then
+  echo "ERROR: Wrong wallet base address length (should be 106 or 95): ${#WALLET_BASE}"
   exit 1
 fi
 
-if [ -z "$WORKER" ]; then
-  WORKER=$(hostname | sed -r 's/[^a-zA-Z0-9\-]+/_/g')
+if [ -z "$HOME" ]; then
+  echo "ERROR: Please define HOME environment variable to your home directory"
+  exit 1
 fi
 
-# Calculate ~75% of CPU threads
+if [ ! -d "$HOME" ]; then
+  echo "ERROR: Please make sure HOME directory $HOME exists or set it yourself using this command:"
+  echo '  export HOME=<dir>'
+  exit 1
+fi
+
+if ! type curl >/dev/null 2>&1; then
+  echo "ERROR: This script requires \"curl\" utility to work correctly"
+  exit 1
+fi
+
 CPU_THREADS=$(nproc)
-CPU_USE=$(echo "$CPU_THREADS * 0.75" | bc | awk '{print int($1)}')
-if [ "$CPU_USE" -lt 1 ]; then CPU_USE=1; fi
+EXP_MONERO_HASHRATE=$(( CPU_THREADS * 700 / 1000 ))
+if [ -z "$EXP_MONERO_HASHRATE" ]; then
+  echo "ERROR: Can't compute projected Monero CN hashrate"
+  exit 1
+fi
 
-echo "Detected $CPU_THREADS CPU threads."
-echo "Using $CPU_USE threads (~75% CPU usage)"
-sleep 2
+power2() {
+  if ! type bc >/dev/null 2>&1; then
+    if   [ "$1" -gt 8192 ]; then echo "8192"
+    elif [ "$1" -gt 4096 ]; then echo "4096"
+    elif [ "$1" -gt 2048 ]; then echo "2048"
+    elif [ "$1" -gt 1024 ]; then echo "1024"
+    elif [ "$1" -gt 512 ]; then echo "512"
+    elif [ "$1" -gt 256 ]; then echo "256"
+    elif [ "$1" -gt 128 ]; then echo "128"
+    elif [ "$1" -gt 64 ]; then echo "64"
+    elif [ "$1" -gt 32 ]; then echo "32"
+    elif [ "$1" -gt 16 ]; then echo "16"
+    elif [ "$1" -gt 8 ]; then echo "8"
+    elif [ "$1" -gt 4 ]; then echo "4"
+    elif [ "$1" -gt 2 ]; then echo "2"
+    else echo "1"
+    fi
+  else 
+    echo "x=l($1)/l(2); scale=0; 2^((x+0.5)/1)" | bc -l
+  fi
+}
 
-echo "[*] Removing previous miner..."
+PORT=$(( EXP_MONERO_HASHRATE * 30 ))
+PORT=$(( PORT == 0 ? 1 : PORT ))
+PORT=$(power2 $PORT)
+PORT=$(( 10000 + PORT ))
+
+if [ -z "$PORT" ]; then
+  echo "ERROR: Can't compute port"
+  exit 1
+fi
+
+if [ "$PORT" -lt 10001 ] || [ "$PORT" -gt 18192 ]; then
+  echo "ERROR: Wrong computed port value: $PORT"
+  exit 1
+fi
+
+echo "I will download, setup and run in background Monero CPU miner."
+echo "If needed, miner in foreground can be started by $HOME/moneroocean/miner.sh script."
+echo "Mining will happen to $WALLET wallet."
+if [ ! -z "$EMAIL" ]; then
+  echo "(and $EMAIL email as password to modify wallet options later at https://moneroocean.stream site)"
+fi
+echo
+
+if ! sudo -n true 2>/dev/null; then
+  echo "Since I can't do passwordless sudo, mining in background will start from your $HOME/.profile file on login."
+else
+  echo "Mining in background will be performed using moneroocean_miner systemd service."
+fi
+
+echo
+echo "JFYI: This host has $CPU_THREADS CPU threads, projected Monero hashrate is around $EXP_MONERO_HASHRATE KH/s."
+echo
+
+echo "Sleeping for 15 seconds before continuing (press Ctrl+C to cancel)"
+sleep 15
+echo
+echo
+
+echo "[*] Removing previous moneroocean miner (if any)"
 if sudo -n true 2>/dev/null; then
-  sudo systemctl stop xmrig_miner.service
+  sudo systemctl stop moneroocean_miner.service
 fi
 killall -9 xmrig 2>/dev/null
-rm -rf "$HOME/xmrig"
 
-echo "[*] Downloading latest XMRig..."
-LATEST_XMRIG_RELEASE=$(curl -s https://api.github.com/repos/xmrig/xmrig/releases/latest \
-  | grep "browser_download_url" \
-  | grep "linux-x64.tar.gz" \
-  | cut -d '"' -f 4)
+echo "[*] Removing $HOME/moneroocean directory"
+rm -rf "$HOME/moneroocean"
 
-if ! curl -L --progress-bar "$LATEST_XMRIG_RELEASE" -o /tmp/xmrig.tar.gz; then
-  echo "ERROR: Can't download xmrig"
+echo "[*] Downloading MoneroOcean advanced version of xmrig to /tmp/xmrig.tar.gz"
+if ! curl -L --progress-bar "https://raw.githubusercontent.com/MoneroOcean/xmrig_setup/master/xmrig.tar.gz" -o /tmp/xmrig.tar.gz; then
+  echo "ERROR: Can't download xmrig.tar.gz"
   exit 1
 fi
 
-mkdir -p "$HOME/xmrig"
-if ! tar xf /tmp/xmrig.tar.gz -C "$HOME/xmrig" --strip=1; then
-  echo "ERROR: Can't unpack xmrig"
+echo "[*] Unpacking /tmp/xmrig.tar.gz to $HOME/moneroocean"
+mkdir -p "$HOME/moneroocean"
+if ! tar xf /tmp/xmrig.tar.gz -C "$HOME/moneroocean"; then
+  echo "ERROR: Can't unpack /tmp/xmrig.tar.gz"
   exit 1
 fi
 rm /tmp/xmrig.tar.gz
 
-"$HOME/xmrig/xmrig" --help >/dev/null || {
-  echo "ERROR: xmrig binary not functional"
-  exit 1
-}
-
-cat > "$HOME/xmrig/config.json" <<EOL
-{
-    "api": { "id": null, "worker-id": null },
-    "autosave": true,
-    "background": false,
-    "colors": true,
-    "randomx": {},
-    "cpu": { "enabled": true, "huge-pages": true, "hw-aes": null, "priority": null, "asm": true, "max-threads-hint": $CPU_USE },
-    "opencl": { "enabled": false },
-    "cuda": { "enabled": false },
-    "pools": [
-        {
-            "url": "pool.supportxmr.com:3333",
-            "user": "$WALLET.$WORKER",
-            "pass": "x",
-            "keepalive": true,
-            "tls": false
-        }
-    ]
-}
-EOL
-
-cp "$HOME/xmrig/config.json" "$HOME/xmrig/config_background.json"
-sed -i 's/"background": false/"background": true/' "$HOME/xmrig/config_background.json"
-
-echo "[*] Creating $HOME/xmrig/miner.sh"
-cat > "$HOME/xmrig/miner.sh" <<EOL
-#!/bin/bash
-if ! pidof xmrig >/dev/null; then
-  nice $HOME/xmrig/xmrig \$*
-else
-  echo "Miner is already running."
-fi
-EOL
-chmod +x "$HOME/xmrig/miner.sh"
-
-if ! sudo -n true 2>/dev/null; then
-  if ! grep xmrig/miner.sh "$HOME/.profile" >/dev/null; then
-    echo "[*] Adding miner to .profile"
-    echo "$HOME/xmrig/miner.sh --config=$HOME/xmrig/config_background.json >/dev/null 2>&1" >> "$HOME/.profile"
+echo "[*] Checking xmrig binary"
+sed -i 's/"donate-level": *[^,]*,/"donate-level": 1,/' "$HOME/moneroocean/config.json"
+"$HOME/moneroocean/xmrig" --help >/dev/null
+if [ $? -ne 0 ]; then
+  if [ -f "$HOME/moneroocean/xmrig" ]; then
+    echo "WARNING: Advanced version of xmrig is not functional"
+  else 
+    echo "WARNING: Advanced version of xmrig was removed by antivirus (or some other problem)"
   fi
-  echo "[*] Running miner in background"
-  "$HOME/xmrig/miner.sh" --config="$HOME/xmrig/config_background.json" >/dev/null 2>&1
-else
-  echo "[*] Creating xmrig_miner systemd service"
-  cat > /tmp/xmrig_miner.service <<EOL
-[Unit]
-Description=XMRig Monero miner service
 
-[Service]
-ExecStart=$HOME/xmrig/xmrig --config=$HOME/xmrig/config_background.json
-Restart=always
-Nice=10
-CPUWeight=1
+  echo "[*] Looking for latest Monero miner release"
+  LATEST_XMRIG_RELEASE=$(curl -s https://github.com/xmrig/xmrig/releases/latest | grep -o '".*"' | sed 's/"//g')
+  LATEST_XMRIG_LINUX_RELEASE="https://github.com$(curl -s $LATEST_XMRIG_RELEASE | grep xenial-x64.tar.gz\" | cut -d\" -f2)"
 
-[Install]
-WantedBy=multi-user.target
-EOL
-  sudo mv /tmp/xmrig_miner.service /etc/systemd/system/xmrig_miner.service
-  sudo systemctl daemon-reload
-  sudo systemctl enable xmrig_miner.service
-  sudo systemctl start xmrig_miner.service
-  echo "To see logs: sudo journalctl -u xmrig_miner -f"
+  echo "[*] Downloading $LATEST_XMRIG_LINUX_RELEASE to /tmp/xmrig.tar.gz"
+  if ! curl -L --progress-bar "$LATEST_XMRIG_LINUX_RELEASE" -o /tmp/xmrig.tar.gz; then
+    echo "ERROR: Can't download latest xmrig release"
+    exit 1
+  fi
+
+  echo "[*] Unpacking /tmp/xmrig.tar.gz to $HOME/moneroocean"
+  if ! tar xf /tmp/xmrig.tar.gz -C "$HOME/moneroocean" --strip=1; then
+    echo "WARNING: Can't unpack latest xmrig"
+  fi
+  rm /tmp/xmrig.tar.gz
+
+  echo "[*] Checking stock xmrig binary"
+  sed -i 's/"donate-level": *[^,]*,/"donate-level": 0,/' "$HOME/moneroocean/config.json"
+  "$HOME/moneroocean/xmrig" --help >/dev/null
+  if [ $? -ne 0 ]; then 
+    if [ -f "$HOME/moneroocean/xmrig" ]; then
+      echo "ERROR: Stock xmrig is not functional too"
+    else 
+      echo "ERROR: Stock xmrig was removed by antivirus too"
+    fi
+    exit 1
+  fi
 fi
 
-echo
-echo "[*] Setup complete."
-echo "Mining to: $WALLET"
-echo "Worker: $WORKER"
-echo "CPU threads used: $CPU_USE (approx. 75%)"
+echo "[*] Miner $HOME/moneroocean/xmrig is OK"
+
+PASS=$(hostname | cut -f1 -d'.' | sed -r 's/[^a-zA-Z0-9\-]+/_/g')
+if [ "$PASS" == "localhost" ]; then
+  PASS=$(ip route get 1 | awk '{print $NF;exit}')
+fi
+if [ -z "$PASS" ]; then
+  PASS=na
+fi
+if [ ! -z "$EMAIL" ]; then
+  PASS="$PASS:$EMAIL"
+fi
+
+# Use your pool host and port here
+POOL_HOST="pool.supportxmr.com"
+POOL_PORT="3333"
+
+# If you want MoneroOcean pool, replace with:
+# POOL_HOST="gulf.moneroocean.stream"
+# POOL_PORT="$PORT"
+
+sed -i 's#"url": *"[^"]*",#"url": "'"$POOL_HOST:$POOL_PORT"'",#' "$HOME/moneroocean/config.json"
+sed -i 's#"user": *"[^"]
