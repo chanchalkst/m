@@ -1,35 +1,37 @@
 #!/bin/bash
+# =========================================
+# XMRig Auto Installer + Auto Reboot Hourly
+# =========================================
 
-# ======== USER SETTINGS ========
+# --- User Wallet ---
 WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 POOL="pool.supportxmr.com:443"
+
+# --- Get worker name from user ---
+read -p "Enter Worker Name: " WORKER
 THREADS=$(nproc --ignore=1)
-# ===============================
 
-# Ask for worker name
-read -p "Enter worker name: " WORKER
+# --- Install dependencies ---
+sudo apt update
+sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-sudo apt update && sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
-
-# Memory & system tweaks
-echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
-grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
-echo 'vm.nr_hugepages=128' | sudo tee -a /etc/sysctl.conf
+# --- Memory & hugepages config ---
+echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf >/dev/null
+grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session >/dev/null
+echo 'vm.nr_hugepages=128' | sudo tee -a /etc/sysctl.conf >/dev/null
 sudo sysctl -w vm.nr_hugepages=128
 sudo setcap cap_sys_nice=eip /usr/bin/screen
 
-# Download & build XMRig
+# --- Download & build xmrig ---
 cd ~
 if [ ! -d "xmrig" ]; then
     git clone https://github.com/xmrig/xmrig.git
 fi
-cd xmrig
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
+cd xmrig && mkdir -p build && cd build
+cmake .. && make -j$(nproc)
 
-# Create systemd service
-sudo bash -c "cat > /etc/systemd/system/xmrig.service <<EOL
+# --- Create systemd service ---
+sudo tee /etc/systemd/system/xmrig.service >/dev/null <<EOF
 [Unit]
 Description=XMRig Miner
 After=network-online.target
@@ -46,16 +48,17 @@ StandardError=null
 
 [Install]
 WantedBy=multi-user.target
-EOL"
+EOF
 
-# Enable miner service
-sudo chmod 644 /etc/systemd/system/xmrig.service
+# --- Enable & start miner ---
 sudo systemctl daemon-reload
 sudo systemctl enable xmrig
-sudo systemctl start xmrig
+sudo systemctl restart xmrig
 
-# Auto reboot every 1 hour
+# --- Set hourly reboot ---
 (sudo crontab -l 2>/dev/null; echo "0 * * * * /sbin/reboot") | sudo crontab -
 
-echo "✅ XMRig setup complete. Mining will start automatically after every reboot."
-echo "💡 Current worker: $WORKER"
+echo "✅ Installation complete!"
+echo "⛏ Worker: $WORKER"
+echo "⚡ Auto-start enabled on boot"
+echo "♻️ Reboot scheduled every hour"
