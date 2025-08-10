@@ -1,16 +1,32 @@
 #!/bin/bash
-# xmrig_setup_quiet.sh
-# Quiet XMRig miner setup with no output except final message
-# Usage: sudo bash xmrig_setup_quiet.sh [WORKER_ID]
+# xmrig_setup_progress.sh
+# Quiet setup except showing a progress % spinner during make build
+# Usage: sudo bash xmrig_setup_progress.sh [WORKER_ID]
 
 set -euo pipefail
 
 BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
-WORKER_ID="${1:-A00001}"
+WORKER_ID="${1:-S00001}"
 WALLET="$BASE_WALLET.$WORKER_ID"
 
 CPU_CORES=$(nproc)
 THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
+
+show_progress() {
+  local pid=$1
+  local delay=0.1
+  local spinstr='|/-\'
+  local i=0
+  local progress=0
+
+  while kill -0 $pid 2>/dev/null; do
+    i=$(( (i+1) %4 ))
+    progress=$(( (progress + 1) % 101 ))
+    printf "\rProgress: %3d%% %c" "$progress" "${spinstr:$i:1}"
+    sleep $delay
+  done
+  printf "\rProgress: 100%% done\n"
+}
 
 {
   sudo apt update -qq
@@ -41,7 +57,9 @@ THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
   cd build
 
   cmake .. -Wno-dev > /dev/null 2>&1
-  make -j"$CPU_CORES" > /dev/null 2>&1
+
+  make -j"$CPU_CORES" > /dev/null 2>&1 &  # run make silently in background
+  show_progress $!
 
   # Create systemd service
   sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
