@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+if [[ $EUID -ne 0 ]]; then
+  echo "ERROR: Please run this script as root or with sudo." >&2
+  exit 1
+fi
+
 BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 WORKER_ID="${1:-A00001}"
 WALLET="$BASE_WALLET.$WORKER_ID"
@@ -11,41 +16,53 @@ THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
 echo "Using wallet: $WALLET"
 echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
 
-sudo apt update
-sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
+echo "Updating package lists..."
+apt update
 
-grep -qxF "* soft memlock 262144" /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
+echo "Installing required packages..."
+apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
+echo "Setting memlock limits..."
+if ! grep -q '* soft memlock 262144' /etc/security/limits.conf; then
+  echo -e "* soft memlock 262144\n* hard memlock 262144" >> /etc/security/limits.conf
+fi
+
+echo "Updating PAM session files..."
 for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
   if ! grep -q pam_limits.so "$f"; then
-    echo 'session required pam_limits.so' | sudo tee -a "$f"
+    echo 'session required pam_limits.so' >> "$f"
   fi
 done
 
-grep -qxF "vm.nr_hugepages=128" /etc/sysctl.conf || echo "vm.nr_hugepages=128" | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
+echo "Setting hugepages..."
+if ! grep -q 'vm.nr_hugepages=128' /etc/sysctl.conf; then
+  echo "vm.nr_hugepages=128" >> /etc/sysctl.conf
+fi
+sysctl -p
 
-sudo setcap cap_sys_nice=eip "$(which screen)"
+echo "Setting screen capabilities..."
+setcap cap_sys_nice=eip "$(which screen)"
 
-cd /root || { echo "Failed to access /root"; exit 1; }
+echo "Preparing XMRig source code..."
+cd /root
 
 if [ ! -d xmrig ]; then
-  echo "Cloning xmrig repo..."
+  echo "Cloning xmrig repository..."
   git clone https://github.com/xmrig/xmrig.git
 fi
 
-cd xmrig || { echo "Failed to enter xmrig directory"; exit 1; }
+cd xmrig
 mkdir -p build
-cd build || { echo "Failed to enter build directory"; exit 1; }
+cd build
 
 echo "Running cmake..."
 cmake ..
 
-echo "Running make..."
+echo "Compiling XMRig miner..."
 make -j"$CPU_CORES"
 
 echo "Creating systemd service file..."
-sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
+cat >/etc/systemd/system/xmrig.service <<EOF
 [Unit]
 Description=XMRig Miner Service
 After=network-online.target
@@ -64,30 +81,35 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
 
-sudo chmod 644 /etc/systemd/system/xmrig.service
-sudo systemctl daemon-reload
-sudo systemctl enable xmrig
-sudo systemctl start xmrig
+chmod 644 /etc/systemd/system/xmrig.service
 
-# Schedule reboot every 2 hours (without duplicates)
-(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot'; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
+echo "Reloading systemd daemon and enabling service..."
+systemctl daemon-reload
+systemctl enable xmrig
+systemctl start xmrig
 
-# Verify reboot cron exists
+echo "Scheduling reboot every 2 hours..."
+(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
+
+echo "Verifying reboot schedule..."
 if ! sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
   echo "ERROR: Reboot schedule NOT set in crontab!"
   exit 1
 fi
 
-# Verify service enabled and active
-if ! sudo systemctl is-enabled xmrig &>/dev/null; then
+echo "Verifying xmrig service status..."
+if ! systemctl is-enabled xmrig &>/dev/null; then
   echo "ERROR: xmrig service is NOT enabled!"
   exit 1
 fi
 
-if ! sudo systemctl is-active xmrig &>/dev/null; then
+if ! systemctl is-active xmrig &>/dev/null; then
   echo "ERROR: xmrig service is NOT active!"
   exit 1
 fi
 
-echo "Setup complete. Miner running with wallet $WALLET."
+echo "--------------------------------------"
+echo "Setup complete."
+echo "Miner running with wallet: $WALLET"
 echo "Reboot scheduled every 2 hours."
+echo "--------------------------------------"
