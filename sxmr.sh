@@ -25,8 +25,13 @@ sudo sysctl -p
 sudo setcap cap_sys_nice=eip $(which screen)
 
 cd ~
-[ ! -d xmrig ] && git clone https://github.com/xmrig/xmrig.git
-cd xmrig/build 2>/dev/null || mkdir -p build && cd build
+if [ ! -d xmrig ]; then
+  git clone https://github.com/xmrig/xmrig.git
+fi
+cd xmrig
+mkdir -p build
+cd build
+
 cmake ..
 make -j"$CPU_CORES"
 
