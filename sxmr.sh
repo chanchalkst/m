@@ -10,6 +10,8 @@ CPU_CORES=$(nproc)
 THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
 echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
 
+set -e  # exit on any error
+
 sudo apt update
 sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
@@ -24,17 +26,24 @@ sudo sysctl -p
 
 sudo setcap cap_sys_nice=eip $(which screen)
 
-cd /root || exit 1
-if [ ! -d xmrig ]; then
-  git clone https://github.com/xmrig/xmrig.git
-fi
-cd xmrig || exit 1
-mkdir -p build
-cd build || exit 1
+cd /root || { echo "Failed to access /root"; exit 1; }
 
+if [ ! -d xmrig ]; then
+  echo "Cloning xmrig repo..."
+  git clone https://github.com/xmrig/xmrig.git || { echo "Git clone failed"; exit 1; }
+fi
+
+cd xmrig || { echo "Failed to enter xmrig directory"; exit 1; }
+mkdir -p build
+cd build || { echo "Failed to enter build directory"; exit 1; }
+
+echo "Running cmake..."
 cmake .. || { echo "cmake failed"; exit 1; }
+
+echo "Running make..."
 make -j"$CPU_CORES" || { echo "make failed"; exit 1; }
 
+echo "Creating systemd service file..."
 sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
 [Unit]
 Description=XMRig Miner Service
@@ -57,8 +66,11 @@ EOF
 sudo chmod 644 /etc/systemd/system/xmrig.service
 sudo systemctl daemon-reload
 sudo systemctl enable xmrig
-sudo systemctl start xmrig
 
+echo "Starting xmrig service..."
+sudo systemctl start xmrig || { echo "Failed to start xmrig service"; exit 1; }
+
+# Schedule reboot every 2 hours
 (sudo crontab -l 2>/dev/null; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
 
 echo "Setup done. Miner running under 'xmrig' service with wallet $WALLET"
