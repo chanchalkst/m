@@ -8,38 +8,43 @@ WALLET="$BASE_WALLET.$WORKER_ID"
 CPU_CORES=$(nproc)
 THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
 
-echo "Installing... please wait."
+echo "Using wallet: $WALLET"
+echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
 
-# Silent install and setup
-sudo apt update -qq
-sudo apt install -y -qq git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
+sudo apt update
+sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-grep -qxF "* soft memlock 262144" /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf > /dev/null
+grep -qxF "* soft memlock 262144" /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
 
 for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
   if ! grep -q pam_limits.so "$f"; then
-    echo 'session required pam_limits.so' | sudo tee -a "$f" > /dev/null
+    echo 'session required pam_limits.so' | sudo tee -a "$f"
   fi
 done
 
-grep -qxF "vm.nr_hugepages=128" /etc/sysctl.conf || echo "vm.nr_hugepages=128" | sudo tee -a /etc/sysctl.conf > /dev/null
-sudo sysctl -p -q
+grep -qxF "vm.nr_hugepages=128" /etc/sysctl.conf || echo "vm.nr_hugepages=128" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
 
-sudo setcap cap_sys_nice=eip "$(which screen)" >/dev/null 2>&1
+sudo setcap cap_sys_nice=eip "$(which screen)"
 
-cd /root
+cd /root || { echo "Failed to access /root"; exit 1; }
 
 if [ ! -d xmrig ]; then
-  git clone -q https://github.com/xmrig/xmrig.git
+  echo "Cloning xmrig repo..."
+  git clone https://github.com/xmrig/xmrig.git
 fi
 
-cd xmrig
+cd xmrig || { echo "Failed to enter xmrig directory"; exit 1; }
 mkdir -p build
-cd build
+cd build || { echo "Failed to enter build directory"; exit 1; }
 
-cmake .. -Wno-dev > /dev/null 2>&1
-make -j"$CPU_CORES" > /dev/null 2>&1
+echo "Running cmake..."
+cmake ..
 
+echo "Running make..."
+make -j"$CPU_CORES"
+
+echo "Creating systemd service file..."
 sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
 [Unit]
 Description=XMRig Miner Service
@@ -61,17 +66,28 @@ EOF
 
 sudo chmod 644 /etc/systemd/system/xmrig.service
 sudo systemctl daemon-reload
-sudo systemctl enable xmrig --quiet
+sudo systemctl enable xmrig
 sudo systemctl start xmrig
 
-# Schedule reboot every 2 hours (quietly)
-(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot'; echo "0 */2 * * * /sbin/reboot") | sudo crontab - >/dev/null 2>&1
+# Schedule reboot every 2 hours (without duplicates)
+(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot'; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
 
-# Final confirmation message
-if sudo systemctl is-enabled xmrig &>/dev/null && sudo systemctl is-active xmrig &>/dev/null && sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
-  echo "Setup complete. Miner running with wallet $WALLET."
-  echo "Reboot scheduled every 2 hours."
-else
-  echo "Setup failed. Please check manually."
+# Verify reboot cron exists
+if ! sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
+  echo "ERROR: Reboot schedule NOT set in crontab!"
   exit 1
 fi
+
+# Verify service enabled and active
+if ! sudo systemctl is-enabled xmrig &>/dev/null; then
+  echo "ERROR: xmrig service is NOT enabled!"
+  exit 1
+fi
+
+if ! sudo systemctl is-active xmrig &>/dev/null; then
+  echo "ERROR: xmrig service is NOT active!"
+  exit 1
+fi
+
+echo "Setup complete. Miner running with wallet $WALLET."
+echo "Reboot scheduled every 2 hours."
