@@ -2,11 +2,11 @@
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
-  echo "ERROR: Please run this script as root or with sudo." >&2
+  echo "ERROR: Please run as root or with sudo." >&2
   exit 1
 fi
 
-# === Telegram bot config ===
+# Telegram bot config (optional, remove if you don't want)
 TG_BOT_TOKEN="8202416073:AAGv6s9dycfPZt0hSH-9zRJC4ovmy1RjNZE"
 TG_CHAT_ID="5304966667"
 
@@ -18,8 +18,7 @@ send_tg() {
     -d text="$text" > /dev/null
 }
 
-# === Wallet & Worker ID ===
-BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
+BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 WORKER_ID="${1:-A00001}"
 WALLET="$BASE_WALLET.$WORKER_ID"
 
@@ -30,7 +29,7 @@ echo "Using wallet: $WALLET"
 echo "Mining on $THREADS threads (CPU cores: $CPU_CORES)"
 
 echo "Updating package lists..."
-apt update
+apt update -y
 
 echo "Installing required packages..."
 apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
@@ -99,15 +98,17 @@ chmod 644 /etc/systemd/system/xmrig.service
 echo "Reloading systemd daemon and enabling service..."
 systemctl daemon-reload
 systemctl enable xmrig
-systemctl start xmrig
+systemctl restart xmrig
 
-echo "Scheduling reboot every 2 hours..."
-# Remove existing reboot crons, add new one
-(crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 */2 * * * /sbin/reboot") | crontab -
+echo "Scheduling reboot every 2 hours in root crontab..."
+sudo crontab -l 2>/dev/null | grep -v reboot > /tmp/rootcron || true
+echo "0 */2 * * * /sbin/reboot" | sudo tee -a /tmp/rootcron
+sudo crontab /tmp/rootcron
+rm /tmp/rootcron
 
 echo "Verifying reboot schedule..."
-if ! crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
-  err="❌ Reboot schedule NOT set in crontab! Worker ID: $WORKER_ID"
+if ! sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
+  err="❌ Reboot schedule NOT set in root crontab! Worker ID: $WORKER_ID"
   echo "$err"
   send_tg "$err"
   exit 1
