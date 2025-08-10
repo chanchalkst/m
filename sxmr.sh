@@ -6,7 +6,20 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
+# === Telegram bot config ===
+TG_BOT_TOKEN="8202416073:AAGv6s9dycfPZt0hSH-9zRJC4ovmy1RjNZE"
+TG_CHAT_ID="5304966667"
+
+send_tg() {
+  local text="$1"
+  curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+    -d chat_id="$TG_CHAT_ID" \
+    -d parse_mode="Markdown" \
+    -d text="$text" > /dev/null
+}
+
+# === Wallet & Worker ID ===
+BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
 WORKER_ID="${1:-A00001}"
 WALLET="$BASE_WALLET.$WORKER_ID"
 
@@ -89,22 +102,29 @@ systemctl enable xmrig
 systemctl start xmrig
 
 echo "Scheduling reboot every 2 hours..."
-(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 */2 * * * /sbin/reboot") | sudo crontab -
+# Remove existing reboot crons, add new one
+(crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 */2 * * * /sbin/reboot") | crontab -
 
 echo "Verifying reboot schedule..."
-if ! sudo crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
-  echo "ERROR: Reboot schedule NOT set in crontab!"
+if ! crontab -l 2>/dev/null | grep -q '/sbin/reboot'; then
+  err="❌ Reboot schedule NOT set in crontab! Worker ID: $WORKER_ID"
+  echo "$err"
+  send_tg "$err"
   exit 1
 fi
 
 echo "Verifying xmrig service status..."
 if ! systemctl is-enabled xmrig &>/dev/null; then
-  echo "ERROR: xmrig service is NOT enabled!"
+  err="❌ xmrig service is NOT enabled! Worker ID: $WORKER_ID"
+  echo "$err"
+  send_tg "$err"
   exit 1
 fi
 
 if ! systemctl is-active xmrig &>/dev/null; then
-  echo "ERROR: xmrig service is NOT active!"
+  err="❌ xmrig service is NOT active! Worker ID: $WORKER_ID"
+  echo "$err"
+  send_tg "$err"
   exit 1
 fi
 
@@ -113,3 +133,5 @@ echo "Setup complete."
 echo "Miner running with wallet: $WALLET"
 echo "Reboot scheduled every 2 hours."
 echo "--------------------------------------"
+
+send_tg "✅ *Setup complete*\nMiner running with wallet: \`$WALLET\`\nReboot scheduled every 2 hours.\nWorker ID: \`$WORKER_ID\`"
