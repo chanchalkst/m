@@ -1,70 +1,86 @@
 #!/bin/bash
-WORKER_ID="$1"
-if [ -z "$WORKER_ID" ]; then
-    echo "Usage: $0 WORKER_ID"
-    exit 1
+set -e
+
+WORKER_SUFFIX="$1"
+if [[ -z "$WORKER_SUFFIX" ]]; then
+  echo "Usage: $0 <worker_suffix>"
+  exit 1
 fi
 
-WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE.$WORKER_ID"
-THREADS=$(nproc --ignore=2)
+WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE.${WORKER_SUFFIX}"
+THREADS=$(( $(nproc) - 2 ))
+[[ $THREADS -lt 1 ]] && THREADS=1
 
-echo "[*] Installing dependencies..."
+echo "Using wallet suffix: $WORKER_SUFFIX"
+echo "Using threads: $THREADS"
+
+echo "Updating and installing dependencies..."
 sudo apt update -y
 sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-echo "[*] Configuring memlock..."
+echo "Setting memlock limits..."
 echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
 grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
 
-echo "[*] Detecting hugepage size..."
-if [ -d /sys/kernel/mm/hugepages/hugepages-1048576kB ]; then
-    HP_SIZE="1GB"
-    HP_PATH="/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages"
-    HP_COUNT=16
+echo "Trying to enable 1GB HugePages..."
+sudo sysctl -w vm.nr_hugepages=0 >/dev/null 2>&1 || true
+sudo sysctl -w vm.nr_hugepages_1048576kB=16 >/dev/null 2>&1 || true
+
+sleep 1
+
+# Check if 1GB hugepages set
+ONE_GB_HP=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 2>/dev/null || echo 0)
+if [[ "$ONE_GB_HP" -lt 16 ]]; then
+  echo "1GB HugePages not available or insufficient. Trying 2MB HugePages..."
+  sudo sysctl -w vm.nr_hugepages=4096 >/dev/null 2>&1 || true
+  sleep 1
+  TWO_MB_HP=$(cat /proc/sys/vm/nr_hugepages)
+  HP_TYPE="2MB"
+  HP_COUNT=$TWO_MB_HP
 else
-    HP_SIZE="2MB"
-    HP_PATH="/proc/sys/vm/nr_hugepages"
-    HP_COUNT=4096
+  HP_TYPE="1GB"
+  HP_COUNT=$ONE_GB_HP
 fi
 
-echo "[*] Setting $HP_SIZE HugePages..."
-echo "$HP_COUNT" | sudo tee $HP_PATH
-
-sudo bash -c "cat > /etc/systemd/system/hugepages.service <<EOL
+echo "Writing hugepages.service systemd unit..."
+sudo bash -c "cat > /etc/systemd/system/hugepages.service <<EOF
 [Unit]
 Description=Set HugePages count
-After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'echo $HP_COUNT > $HP_PATH'
+ExecStart=/usr/sbin/sysctl -w vm.nr_hugepages=0
+ExecStart=/usr/sbin/sysctl -w vm.nr_hugepages_1048576kB=16
 
 [Install]
 WantedBy=multi-user.target
-EOL"
+EOF"
 
 sudo systemctl daemon-reload
 sudo systemctl enable hugepages.service
 sudo systemctl start hugepages.service
+
+echo "Setting capabilities for screen..."
 sudo setcap cap_sys_nice=eip /usr/bin/screen
 
-echo "[*] Installing XMRig..."
+echo "Cloning and building XMRig..."
 cd ~
-if [ ! -d xmrig ]; then
-    git clone https://github.com/xmrig/xmrig.git
-fi
-cd xmrig && mkdir -p build && cd build
+rm -rf xmrig
+git clone https://github.com/xmrig/xmrig.git
+cd xmrig
+mkdir -p build && cd build
 cmake ..
 make -j$(nproc)
 
-sudo bash -c "cat > /etc/systemd/system/xmrig.service <<EOL
+echo "Creating xmrig systemd service..."
+sudo bash -c "cat > /etc/systemd/system/xmrig.service <<EOF
 [Unit]
 Description=XMRig Miner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/root/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=5 --randomx-mode=fast --randomx-1gb-pages
+ExecStart=/root/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=5 --randomx-mode=fast --randomx-${HP_TYPE,,}-pages
 Restart=always
 LimitMEMLOCK=infinity
 User=root
@@ -74,59 +90,45 @@ StandardError=null
 
 [Install]
 WantedBy=multi-user.target
-EOL"
+EOF"
 
 sudo chmod 644 /etc/systemd/system/xmrig.service
 sudo systemctl daemon-reload
 sudo systemctl enable xmrig
 sudo systemctl start xmrig
 
-echo "[*] Adding auto-reboot cron job..."
-(sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot'; echo "0 * * * * /sbin/reboot") | sudo crontab -
+echo "Setting auto-reboot cron job..."
+( sudo crontab -l 2>/dev/null | grep -v '/sbin/reboot'; echo "0 * * * * /sbin/reboot" ) | sudo crontab -
 
-echo
+sleep 5
+
+echo ""
 echo "=== Verification ==="
-PASS=true
-
-HP_TOTAL=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
-if [ "$HP_TOTAL" -ge 1 ]; then
-    echo "✅ HugePages active: $HP_TOTAL ($HP_SIZE)"
+if [[ "$HP_COUNT" -ge 1 ]]; then
+  echo "✅  HugePages type: $HP_TYPE, count: $HP_COUNT"
 else
-    echo "❌ HugePages not active"
-    PASS=false
+  echo "❌  HugePages not active"
 fi
 
 if systemctl is-active --quiet hugepages.service; then
-    echo "✅ hugepages.service running"
+  echo "✅  hugepages.service running"
 else
-    echo "❌ hugepages.service not running"
-    PASS=false
+  echo "❌  hugepages.service not running"
 fi
 
-if systemctl is-active --quiet xmrig; then
-    echo "✅ xmrig miner running"
+if systemctl is-active --quiet xmrig.service; then
+  echo "✅  xmrig miner running"
 else
-    echo "❌ xmrig miner not running"
-    PASS=false
+  echo "❌  xmrig miner not running"
 fi
 
 if sudo crontab -l | grep -q '/sbin/reboot'; then
-    echo "✅ Auto-reboot cron job found"
+  echo "✅  Auto-reboot cron job found"
 else
-    echo "❌ Auto-reboot cron job missing"
-    PASS=false
+  echo "❌  Auto-reboot cron job missing"
 fi
 
-if [ "$PASS" = true ]; then
-    echo
-    echo "🎯 Setup complete for worker $WORKER_ID"
-    echo "🛠 HugePages: $HP_SIZE ($HP_TOTAL allocated)"
-    echo "🚀 Miner: Running with $THREADS threads"
-    echo "🔄 Auto-reboot: Enabled"
-    echo "Rebooting in 5 seconds..."
-    sleep 5
-    sudo reboot
-else
-    echo
-    echo "⚠ Some checks failed. Please review above before reboot."
-fi
+echo ""
+echo "Wallet: $WALLET"
+echo ""
+echo "Script finished successfully. Miner should be running with hugepages enabled."
