@@ -1,73 +1,87 @@
 #!/bin/bash
 set -e
 
-WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE.H00022"
-THREADS=$(nproc --ignore=2)
+WALLET_BASE="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
+WORKER_ID="$1"
+if [[ -z "$WORKER_ID" ]]; then
+  echo "Usage: $0 <worker_id_suffix>"
+  exit 1
+fi
+WALLET="${WALLET_BASE}.${WORKER_ID}"
+THREADS=$(( $(nproc) - 2 ))
+[ $THREADS -lt 1 ] && THREADS=1
 
-echo "Updating packages and installing dependencies..."
+# Install dependencies
 sudo apt update
 sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
 
-echo "Setting memlock limits..."
+# Set memlock limits
 echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
-if ! grep -q pam_limits.so /etc/pam.d/common-session; then
-  echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
-fi
+grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
 
-echo "Creating hugepages setup script..."
-sudo tee /usr/local/sbin/set_hugepages.sh > /dev/null << 'EOF'
-#!/bin/bash
-set -e
+# Function to setup hugepages service
+setup_hugepages() {
+  local size_kb=$1
+  local pages=$2
+  local service_file="/etc/systemd/system/hugepages.service"
+  echo "Trying to enable ${size_kb}KB HugePages..."
+  if [[ "$size_kb" == "1048576" ]]; then
+    # 1GB pages
+    echo "vm.nr_hugepages=0" | sudo tee /etc/sysctl.d/99-hugepages.conf > /dev/null
+    echo "vm.nr_hugepages_${size_kb}kB=${pages}" | sudo tee -a /etc/sysctl.d/99-hugepages.conf > /dev/null
+  else
+    # 2MB pages
+    echo "vm.nr_hugepages=${pages}" | sudo tee /etc/sysctl.d/99-hugepages.conf > /dev/null
+  fi
+  sudo sysctl --system
 
-echo "Trying to set 1GB hugepages..."
-if sudo sysctl -w vm.nr_hugepages_1048576kB=16; then
-  echo "1GB HugePages set successfully."
-  sudo sysctl -w vm.nr_hugepages=0
-else
-  echo "1GB HugePages failed or unavailable. Trying 2MB hugepages..."
-  sudo sysctl -w vm.nr_hugepages=4096
-  sudo sysctl -w vm.nr_hugepages_1048576kB=0
-fi
-
-echo "Current HugePages settings:"
-sysctl vm.nr_hugepages vm.nr_hugepages_1048576kB
-EOF
-
-sudo chmod +x /usr/local/sbin/set_hugepages.sh
-
-echo "Creating systemd service for hugepages..."
-sudo tee /etc/systemd/system/hugepages.service > /dev/null << EOF
+  sudo bash -c "cat > $service_file" <<EOF
 [Unit]
 Description=Set HugePages count
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/set_hugepages.sh
+ExecStart=/usr/sbin/sysctl -w vm.nr_hugepages=0
+ExecStart=/usr/sbin/sysctl -w vm.nr_hugepages_${size_kb}kB=${pages}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-echo "Reloading systemd and enabling hugepages service..."
-sudo systemctl daemon-reload
-sudo systemctl enable hugepages.service
-sudo systemctl start hugepages.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable hugepages.service
+  sudo systemctl start hugepages.service
+}
 
-echo "Setting screen capabilities..."
+# Try 1GB hugepages (16 pages)
+setup_hugepages 1048576 16
+sleep 3
+ONEGB_FREE=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages 2>/dev/null || echo 0)
+
+if [[ "$ONEGB_FREE" -lt 16 ]]; then
+  echo "1GB HugePages not available or insufficient. Trying 2MB HugePages..."
+  setup_hugepages 2048 4096
+  sleep 3
+  TWOMB_FREE=$(cat /proc/sys/vm/nr_hugepages 2>/dev/null || echo 0)
+  if [[ "$TWOMB_FREE" -lt 4096 ]]; then
+    echo "Failed to allocate enough 2MB HugePages. HugePages might not be properly set."
+  fi
+fi
+
+# Set cap_sys_nice for screen
 sudo setcap cap_sys_nice=eip /usr/bin/screen
 
-echo "Cloning and building XMRig miner..."
+# Clone and build xmrig
 cd ~
-if [ -d xmrig ]; then rm -rf xmrig; fi
-git clone https://github.com/xmrig/xmrig.git
+[ ! -d xmrig ] && git clone https://github.com/xmrig/xmrig.git
 cd xmrig
 mkdir -p build
 cd build
-cmake ..
+cmake .. 
 make -j$(nproc)
 
-echo "Creating systemd service for xmrig miner..."
-sudo tee /etc/systemd/system/xmrig.service > /dev/null << EOF
+# Setup xmrig systemd service
+sudo bash -c "cat > /etc/systemd/system/xmrig.service" <<EOF
 [Unit]
 Description=XMRig Miner
 After=network-online.target
@@ -88,23 +102,48 @@ EOF
 
 sudo chmod 644 /etc/systemd/system/xmrig.service
 sudo systemctl daemon-reload
-sudo systemctl enable xmrig.service
-sudo systemctl start xmrig.service
+sudo systemctl enable xmrig
+sudo systemctl start xmrig
 
-echo "Setting up hourly reboot cron job..."
+# Setup cron for auto reboot hourly
 (sudo crontab -l 2>/dev/null; echo "0 * * * * /sbin/reboot") | sudo crontab -
 
-echo "=========================="
-echo "Installation complete!"
+# Verification & output
 echo
-echo "HugePages status:"
-sysctl vm.nr_hugepages vm.nr_hugepages_1048576kB
+echo "Using wallet suffix: $WORKER_ID"
+echo "Using threads: $THREADS"
 echo
-echo "XMRig miner status:"
-systemctl is-active xmrig.service && echo "✅ xmrig miner is running" || echo "❌ xmrig miner is NOT running"
+echo "=== Verification ==="
+ONEGB_ALLOCATED=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 2>/dev/null || echo 0)
+TWOMB_ALLOCATED=$(cat /proc/sys/vm/nr_hugepages 2>/dev/null || echo 0)
+
+if [[ "$ONEGB_ALLOCATED" -ge 16 ]]; then
+  echo "✅  1GB HugePages allocated: $ONEGB_ALLOCATED"
+elif [[ "$TWOMB_ALLOCATED" -ge 4096 ]]; then
+  echo "✅  2MB HugePages allocated: $TWOMB_ALLOCATED"
+else
+  echo "❌  HugePages not active"
+fi
+
+if systemctl is-active --quiet hugepages.service; then
+  echo "✅  hugepages.service running"
+else
+  echo "❌  hugepages.service not running"
+fi
+
+if systemctl is-active --quiet xmrig.service; then
+  echo "✅  xmrig miner running"
+else
+  echo "❌  xmrig miner not running"
+fi
+
+if sudo crontab -l | grep -q '/sbin/reboot'; then
+  echo "✅  Auto-reboot cron job found"
+else
+  echo "❌  Auto-reboot cron job missing"
+fi
+
 echo
-echo "HugePages service status:"
-systemctl is-active hugepages.service && echo "✅ hugepages.service is running" || echo "❌ hugepages.service is NOT running"
+echo "Wallet: $WALLET"
 echo
-echo "Auto reboot cron job set (hourly)."
-echo "=========================="
+echo "Script finished successfully. Miner should be running with hugepages enabled."
