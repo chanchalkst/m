@@ -1,80 +1,95 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-if [[ $EUID -ne 0 ]]; then
-  echo "Run as root or with sudo"
-  exit 1
+if [ -z "$1" ]; then
+    echo "Usage: $0 <WORKER_SUFFIX>"
+    exit 1
 fi
 
-# Telegram bot config (optional)
-TG_BOT_TOKEN="YOUR_BOT_TOKEN"
-TG_CHAT_ID="YOUR_CHAT_ID"
-send_tg() {
-  local text="$1"
-  curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-    -d chat_id="$TG_CHAT_ID" \
-    -d parse_mode="Markdown" \
-    -d text="$text" >/dev/null || true
-}
+SUFFIX=$1
+WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1JjJg3uQdY9d8ZcYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE.$SUFFIX"
+THREADS=$(nproc --ignore=2)
 
-WORKER_ID="${1:-A00001}"
-BASE_WALLET="42ZN85ZmYaKMSVZaF7hz7KCSVe73MBxH1Jjg3uQdY9d8cYZBCDkvoeJ5YmevGb6cPJmvWVaRoJMMEU3gcU4eCoAtkLvRE"
-WALLET="$BASE_WALLET.$WORKER_ID"
+echo "[INFO] Worker: $SUFFIX"
+echo "[INFO] Wallet: $WALLET"
 
-# Create user doctor if missing
-if ! id -u doctor &>/dev/null; then
-  useradd -m -r -s /usr/sbin/nologin doctor
+sudo apt update && sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
+
+# memlock limits
+echo -e "* soft memlock 262144\n* hard memlock 262144" | sudo tee -a /etc/security/limits.conf
+grep -q pam_limits.so /etc/pam.d/common-session || echo 'session required pam_limits.so' | sudo tee -a /etc/pam.d/common-session
+
+# Detect hugepages size
+if [ -d /sys/kernel/mm/hugepages/hugepages-1048576kB ]; then
+    echo "[INFO] 1GB HugePages supported, enabling..."
+    sudo sysctl -w vm.nr_hugepages=0
+    echo 16 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+    HP_MODE="--randomx-1gb-pages"
+else
+    echo "[INFO] 1GB HugePages NOT supported, using 2MB..."
+    sudo sysctl -w vm.nr_hugepages=128
+    HP_MODE="--huge-pages"
 fi
 
-CPU_CORES=$(nproc)
-THREADS=$(( CPU_CORES > 1 ? CPU_CORES - 1 : 1 ))
-
-apt update
-apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev screen curl libcap2-bin
-
-# Setup limits & hugepages
-grep -q '* soft memlock 262144' /etc/security/limits.conf || echo -e "* soft memlock 262144\n* hard memlock 262144" >> /etc/security/limits.conf
-for f in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
-  grep -q pam_limits.so "$f" || echo 'session required pam_limits.so' >> "$f"
-done
-grep -q 'vm.nr_hugepages=128' /etc/sysctl.conf || echo "vm.nr_hugepages=128" >> /etc/sysctl.conf
-sysctl -p
-setcap cap_sys_nice=eip "$(which screen)"
-
-cd /home/doctor
-if [ ! -d xmrig ]; then
-  sudo -u doctor git clone https://github.com/xmrig/xmrig.git
-fi
-cd xmrig/build 2>/dev/null || mkdir -p build && cd build
-sudo -u doctor cmake ..
-sudo -u doctor make -j"$CPU_CORES"
-
-cat >/etc/systemd/system/xmrig.service <<EOF
+# Persistent hugepages at boot
+sudo bash -c "cat >/etc/systemd/system/hugepages.service" <<EOL
 [Unit]
-Description=XMRig Miner Service
+Description=Set HugePages at boot
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=$(which sysctl) -w vm.nr_hugepages=$( [ "$HP_MODE" = "--huge-pages" ] && echo 128 || echo 0 )
+ExecStart=$( [ "$HP_MODE" = "--randomx-1gb-pages" ] && echo "/bin/echo 16 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages" || echo /bin/true )
+
+[Install]
+WantedBy=sysinit.target
+EOL
+
+sudo systemctl daemon-reload
+sudo systemctl enable hugepages.service
+sudo systemctl start hugepages.service
+
+# Allow screen priority
+sudo setcap cap_sys_nice=eip /usr/bin/screen
+
+# Build XMRig
+cd ~
+[ -d xmrig ] && rm -rf xmrig
+git clone https://github.com/xmrig/xmrig.git
+cd xmrig && mkdir build && cd build
+cmake ..
+make -j$(nproc)
+
+# Miner service (auto start at boot)
+sudo bash -c "cat >/etc/systemd/system/xmrig.service" <<EOL
+[Unit]
+Description=XMRig Miner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/home/doctor/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=2 --randomx-mode=fast --randomx-1gb-pages
+ExecStart=/root/xmrig/build/xmrig -o pool.supportxmr.com:443 -u $WALLET -k --tls --threads=$THREADS --donate-level=0 --cpu-priority=5 --randomx-mode=fast $HP_MODE
 Restart=always
 LimitMEMLOCK=infinity
-User=doctor
-WorkingDirectory=/home/doctor/xmrig/build
+User=root
+WorkingDirectory=/root/xmrig/build
 StandardOutput=null
 StandardError=null
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 
-chmod 644 /etc/systemd/system/xmrig.service
-systemctl daemon-reload
-systemctl enable xmrig
-systemctl start xmrig
+sudo chmod 644 /etc/systemd/system/xmrig.service
+sudo systemctl daemon-reload
+sudo systemctl enable xmrig
+sudo systemctl start xmrig
 
-# Schedule hourly reboot via root crontab
-(crontab -l 2>/dev/null | grep -v '/sbin/reboot' || true; echo "0 * * * * /sbin/reboot") | crontab -
+# Hourly reboot
+( sudo crontab -l 2>/dev/null; echo "0 * * * * /sbin/reboot" ) | sudo crontab -
 
-echo "Setup complete: Miner running as doctor user and system reboots hourly."
-send_tg "✅ Setup complete\nWorker ID: \`$WORKER_ID\`\nMiner running and system will reboot hourly."
+echo "===== SETUP COMPLETE ====="
+echo "System will reboot in 1 min to apply everything."
+sudo shutdown -r +1
